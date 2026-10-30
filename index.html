@@ -753,8 +753,49 @@
       ];
     }
 
-    function savePosts() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(posts));
+    function savePosts(nextPosts = posts) {
+      // localStorage への保存が成功してから、画面上の posts を差し替える。
+      // これにより、保存失敗時に「キャンセルすると更新済みに見える」状態を防ぐ。
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextPosts));
+      posts = nextPosts;
+    }
+
+    function fileToDataURL(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error("画像を読み込めませんでした"));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function optimizeImage(file) {
+      // SVG はそのまま保持。それ以外は縮小・圧縮して localStorage の容量超過を起こしにくくする。
+      if (file.type === "image/svg+xml") return fileToDataURL(file);
+
+      const source = await fileToDataURL(file);
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error("画像を読み込めませんでした"));
+        img.src = source;
+      });
+
+      const MAX_SIDE = 1600;
+      const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+      const width = Math.max(1, Math.round(img.naturalWidth * scale));
+      const height = Math.max(1, Math.round(img.naturalHeight * scale));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return source;
+      ctx.drawImage(img, 0, 0, width, height);
+
+      // WebP で軽量化。非対応環境では元画像へフォールバック。
+      const optimized = canvas.toDataURL("image/webp", 0.78);
+      return optimized && optimized.startsWith("data:image/") ? optimized : source;
     }
 
     function makePlaceholder(text = "Thumbnail") {
@@ -1066,17 +1107,25 @@
       let imageData = editing?.image || "";
       let isSaving = false;
 
-      imageInput.addEventListener("change", () => {
+      imageInput.addEventListener("change", async () => {
         const file = imageInput.files?.[0];
         if (!file) return;
 
-        const reader = new FileReader();
-        reader.onload = e => {
-          imageData = e.target.result;
+        imageInput.disabled = true;
+        showToast("画像を読み込んでいます…", 1200);
+
+        try {
+          imageData = await optimizeImage(file);
           preview.src = imageData;
           dropzone.classList.add("has-image");
-        };
-        reader.readAsDataURL(file);
+          showToast("画像を追加しました");
+        } catch (error) {
+          console.error(error);
+          imageInput.value = "";
+          showToast("画像の読み込みに失敗しました", 3200);
+        } finally {
+          imageInput.disabled = false;
+        }
       });
 
       document.getElementById("cancelBtn").addEventListener("click", () => {
@@ -1110,11 +1159,15 @@
           const now = new Date().toISOString();
 
           if (editing) {
-            editing.title = title;
-            editing.body = body;
-            editing.image = imageData || makePlaceholder(title);
-            editing.updatedAt = now;
-            savePosts();
+            const updatedPost = {
+              ...editing,
+              title,
+              body,
+              image: imageData || makePlaceholder(title),
+              updatedAt: now
+            };
+            const nextPosts = posts.map(post => post.id === editing.id ? updatedPost : post);
+            savePosts(nextPosts);
             renderArticle(editing.id);
             showToast("記事を更新しました");
           } else {
@@ -1126,8 +1179,8 @@
               createdAt: now,
               updatedAt: now
             };
-            posts.push(newPost);
-            savePosts();
+            const nextPosts = [...posts, newPost];
+            savePosts(nextPosts);
             renderArticle(newPost.id);
             showToast("投稿しました");
           }
@@ -1137,7 +1190,13 @@
           saveBtn.disabled = false;
           saveBtn.removeAttribute("aria-busy");
           saveBtn.textContent = editing ? "更新する" : "公開する";
-          showToast("保存に失敗しました。もう一度お試しください", 3200);
+          const isQuotaError = error?.name === "QuotaExceededError" || error?.name === "NS_ERROR_DOM_QUOTA_REACHED";
+          showToast(
+            isQuotaError
+              ? "保存容量がいっぱいです。JSONバックアップ後、不要な記事や大きな画像を整理してください"
+              : "保存に失敗しました。もう一度お試しください",
+            4200
+          );
         }
       });
 
