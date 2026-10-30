@@ -723,7 +723,7 @@
     const calendarTitle = document.getElementById("calendarTitle");
     const calendarGrid = document.getElementById("calendarGrid");
 
-    let posts = loadPosts();
+    let posts = [];
     let currentView = "home";
     let currentPostId = null;
     let homeScrollY = 0;
@@ -732,14 +732,64 @@
     let calendarCursor = new Date();
     calendarCursor.setDate(1);
 
-    function loadPosts() {
+    // ---- 保存先: IndexedDB（localStorage の約5MB制限を避ける）。使えない環境では localStorage に退避 ----
+    const DB_NAME = "storyShelfDB";
+    const DB_STORE = "kv";
+    const DB_KEY = "posts";
+    let dbPromise = null;
+
+    function openDB() {
+      if (!dbPromise) {
+        dbPromise = new Promise((resolve, reject) => {
+          if (!window.indexedDB) return reject(new Error("IndexedDB unavailable"));
+          const req = indexedDB.open(DB_NAME, 1);
+          req.onupgradeneeded = () => req.result.createObjectStore(DB_STORE);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error || new Error("IndexedDB open failed"));
+        });
+        dbPromise.catch(() => { dbPromise = null; });
+      }
+      return dbPromise;
+    }
+
+    async function idbGet() {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const req = db.transaction(DB_STORE, "readonly").objectStore(DB_STORE).get(DB_KEY);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function idbSet(value) {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, "readwrite");
+        tx.objectStore(DB_STORE).put(value, DB_KEY);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
+      });
+    }
+
+    async function loadPosts() {
+      // 1) IndexedDB
+      try {
+        const stored = await idbGet();
+        if (Array.isArray(stored)) return stored;
+      } catch (e) { console.error("IndexedDB read failed:", e); }
+
+      // 2) 旧バージョン（localStorage）からの引き継ぎ。元データは消さずに残す。
       try {
         const saved = localStorage.getItem(STORAGE_KEY);
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) return parsed;
+          if (Array.isArray(parsed)) {
+            try { await idbSet(parsed); } catch (e) { console.error("migration failed:", e); }
+            return parsed;
+          }
         }
-      } catch (e) {}
+      } catch (e) { console.error(e); }
 
       return [
         {
@@ -753,10 +803,15 @@
       ];
     }
 
-    function savePosts(nextPosts = posts) {
-      // localStorage への保存が成功してから、画面上の posts を差し替える。
-      // これにより、保存失敗時に「キャンセルすると更新済みに見える」状態を防ぐ。
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextPosts));
+    async function savePosts(nextPosts = posts) {
+      // 保存が成功してから、画面上の posts を差し替える。
+      try {
+        await idbSet(nextPosts);
+      } catch (error) {
+        const unavailable = !window.indexedDB || /unavailable|open failed/i.test(String(error?.message));
+        if (!unavailable) throw error;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextPosts));
+      }
       posts = nextPosts;
     }
 
@@ -770,7 +825,7 @@
     }
 
     async function optimizeImage(file) {
-      // SVG はそのまま保持。それ以外は縮小・圧縮して localStorage の容量超過を起こしにくくする。
+      // SVG はそのまま保持。それ以外は縮小・圧縮して保存容量を節約する。
       if (file.type === "image/svg+xml") return fileToDataURL(file);
 
       const source = await fileToDataURL(file);
@@ -781,7 +836,7 @@
         img.src = source;
       });
 
-      const MAX_SIDE = 1600;
+      const MAX_SIDE = 1280;
       const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
       const width = Math.max(1, Math.round(img.naturalWidth * scale));
       const height = Math.max(1, Math.round(img.naturalHeight * scale));
@@ -794,7 +849,7 @@
       ctx.drawImage(img, 0, 0, width, height);
 
       // WebP で軽量化。非対応環境では元画像へフォールバック。
-      const optimized = canvas.toDataURL("image/webp", 0.78);
+      const optimized = canvas.toDataURL("image/webp", 0.75);
       return optimized && optimized.startsWith("data:image/") ? optimized : source;
     }
 
@@ -1045,10 +1100,15 @@
       document.getElementById("backHome").addEventListener("click", () => goHome({ restoreScroll: true }));
       document.getElementById("backHomeBottom").addEventListener("click", () => goHome({ restoreScroll: true }));
       document.getElementById("editBtn").addEventListener("click", () => renderEditor(id));
-      document.getElementById("deleteBtn").addEventListener("click", () => {
+      document.getElementById("deleteBtn").addEventListener("click", async () => {
         if (!confirm("この記事を削除しますか？")) return;
-        posts = posts.filter(p => p.id !== id);
-        savePosts();
+        try {
+          await savePosts(posts.filter(p => p.id !== id));
+        } catch (error) {
+          console.error(error);
+          showToast("削除に失敗しました。もう一度お試しください", 3200);
+          return;
+        }
         showToast("記事を削除しました");
         goHome({ restoreScroll: true });
       });
@@ -1143,7 +1203,7 @@
         editing ? renderArticle(editing.id) : goHome({ restoreScroll: true });
       });
 
-      saveBtn.addEventListener("click", () => {
+      saveBtn.addEventListener("click", async () => {
         if (isSaving) return;
 
         const title = titleInput.value.trim();
@@ -1181,7 +1241,7 @@
               image: imageData || makePlaceholder(title),
               updatedAt: now
             };
-            savePosts(posts.map(post => post.id === editing.id ? updatedPost : post));
+            await savePosts(posts.map(post => post.id === editing.id ? updatedPost : post));
             savedId = editing.id;
             savedMessage = "記事を更新しました";
           } else {
@@ -1193,7 +1253,7 @@
               createdAt: now,
               updatedAt: now
             };
-            savePosts([...posts, newPost]);
+            await savePosts([...posts, newPost]);
             savedId = newPost.id;
             savedMessage = "投稿しました";
           }
@@ -1275,7 +1335,7 @@
       if (!file) return;
 
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const data = JSON.parse(reader.result);
           const importedPosts = Array.isArray(data) ? data : data?.posts;
@@ -1290,7 +1350,7 @@
           }
 
           // 保存に成功してから posts を差し替える（失敗時は現状維持）
-          savePosts(importedPosts.map(normalizeImportedPost));
+          await savePosts(importedPosts.map(normalizeImportedPost));
         } catch (error) {
           console.error(error);
           const isQuotaError = error?.name === "QuotaExceededError" || error?.name === "NS_ERROR_DOM_QUOTA_REACHED";
@@ -1373,8 +1433,11 @@
       }
     });
 
-    syncMenuControls();
-    renderHome();
+    loadPosts().then(loaded => {
+      posts = loaded;
+      syncMenuControls();
+      renderHome();
+    });
   </script>
 </body>
 </html>
