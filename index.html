@@ -743,7 +743,7 @@
 
       return [
         {
-          id: crypto.randomUUID(),
+          id: newId(),
           title: "最初の記事",
           body: "ここに本文が表示されます。\n\n右上の「記事を書く」から、新しい記事を作成できます。\nサムネイルをクリックすると、この記事ページに移動します。",
           image: makePlaceholder("最初の記事"),
@@ -827,12 +827,23 @@
       }[ch]));
     }
 
+    function newId() {
+      return (crypto.randomUUID && crypto.randomUUID()) || `id-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function safeIso(value, fallback = new Date().toISOString()) {
+      const t = Date.parse(value);
+      return Number.isNaN(t) ? fallback : new Date(t).toISOString();
+    }
+
     function formatDate(iso) {
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return "";
       return new Intl.DateTimeFormat("ja-JP", {
         year: "numeric",
         month: "long",
         day: "numeric"
-      }).format(new Date(iso));
+      }).format(date);
     }
 
     function toLocalDateKey(iso) {
@@ -915,7 +926,7 @@
           return matchesKeyword && matchesDate;
         })
         .slice()
-        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+        .sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0));
     }
 
     function goHome({ restoreScroll = false } = {}) {
@@ -931,7 +942,7 @@
       const cards = filteredPosts.map(post => `
         <article class="post-card" data-post-card="${post.id}">
           <button class="thumb-button" data-open="${post.id}" aria-label="${escapeHTML(post.title)}を開く">
-            <img src="${post.image || makePlaceholder(post.title)}" alt="${escapeHTML(post.title)}のサムネイル">
+            <img src="${escapeHTML(post.image || makePlaceholder(post.title))}" alt="${escapeHTML(post.title)}のサムネイル">
           </button>
           <div class="card-body">
             <h2 class="card-title">${escapeHTML(post.title)}</h2>
@@ -1017,7 +1028,7 @@
           </header>
 
           <div class="article-thumb">
-            <img src="${post.image || makePlaceholder(post.title)}" alt="${escapeHTML(post.title)}のサムネイル">
+            <img src="${escapeHTML(post.image || makePlaceholder(post.title))}" alt="${escapeHTML(post.title)}のサムネイル">
           </div>
 
           <div class="article-body">${escapeHTML(post.body)}</div>
@@ -1069,7 +1080,7 @@
           <div class="field">
             <label>サムネイル</label>
             <div class="dropzone ${editing?.image ? "has-image" : ""}" id="dropzone">
-              <img id="thumbPreview" src="${editing?.image || ""}" alt="">
+              <img id="thumbPreview" src="${escapeHTML(editing?.image || "")}" alt="">
               <div class="dropzone-label">
                 <strong>画像を選択</strong><br>
                 1280 × 670 px 推奨
@@ -1155,7 +1166,11 @@
         saveBtn.setAttribute("aria-busy", "true");
         saveBtn.textContent = editing ? "更新中…" : "投稿中…";
 
+        let savedId = null;
+        let savedMessage = "";
+
         try {
+          // ここでは「保存」だけを try/catch で囲む。描画の失敗を保存失敗と誤認しないため。
           const now = new Date().toISOString();
 
           if (editing) {
@@ -1166,23 +1181,21 @@
               image: imageData || makePlaceholder(title),
               updatedAt: now
             };
-            const nextPosts = posts.map(post => post.id === editing.id ? updatedPost : post);
-            savePosts(nextPosts);
-            renderArticle(editing.id);
-            showToast("記事を更新しました");
+            savePosts(posts.map(post => post.id === editing.id ? updatedPost : post));
+            savedId = editing.id;
+            savedMessage = "記事を更新しました";
           } else {
             const newPost = {
-              id: crypto.randomUUID(),
+              id: newId(),
               title,
               body,
               image: imageData || makePlaceholder(title),
               createdAt: now,
               updatedAt: now
             };
-            const nextPosts = [...posts, newPost];
-            savePosts(nextPosts);
-            renderArticle(newPost.id);
-            showToast("投稿しました");
+            savePosts([...posts, newPost]);
+            savedId = newPost.id;
+            savedMessage = "投稿しました";
           }
         } catch (error) {
           console.error(error);
@@ -1197,6 +1210,16 @@
               : "保存に失敗しました。もう一度お試しください",
             4200
           );
+          return;
+        }
+
+        // 保存成功後の描画。ここで例外が出ても「保存失敗」とは表示しない。
+        showToast(savedMessage);
+        try {
+          renderArticle(savedId);
+        } catch (error) {
+          console.error("render error after save:", error);
+          try { goHome(); } catch (e) { console.error(e); }
         }
       });
 
@@ -1235,13 +1258,14 @@
     }
 
     function normalizeImportedPost(post) {
+      const createdAt = safeIso(post.createdAt);
       return {
-        id: typeof post.id === "string" && post.id ? post.id : crypto.randomUUID(),
+        id: typeof post.id === "string" && post.id ? post.id : newId(),
         title: post.title,
         body: post.body,
         image: typeof post.image === "string" && post.image ? post.image : makePlaceholder(post.title),
-        createdAt: post.createdAt,
-        updatedAt: post.updatedAt
+        createdAt,
+        updatedAt: safeIso(post.updatedAt, createdAt)
       };
     }
 
@@ -1265,8 +1289,19 @@
             return;
           }
 
-          posts = importedPosts.map(normalizeImportedPost);
-          savePosts();
+          // 保存に成功してから posts を差し替える（失敗時は現状維持）
+          savePosts(importedPosts.map(normalizeImportedPost));
+        } catch (error) {
+          console.error(error);
+          const isQuotaError = error?.name === "QuotaExceededError" || error?.name === "NS_ERROR_DOM_QUOTA_REACHED";
+          showToast(isQuotaError ? "保存容量が足りず復元できませんでした" : "このJSONファイルは復元できません", 3200);
+          input.value = "";
+          return;
+        }
+
+        input.value = "";
+        showToast("バックアップから復元しました");
+        try {
           homeSearch = "";
           homeDate = "";
           homeScrollY = 0;
@@ -1274,12 +1309,8 @@
           calendarCursor.setDate(1);
           syncMenuControls();
           renderHome();
-          showToast("バックアップから復元しました");
         } catch (error) {
-          console.error(error);
-          showToast("このJSONファイルは復元できません", 3200);
-        } finally {
-          input.value = "";
+          console.error("render error after import:", error);
         }
       };
       reader.readAsText(file, "utf-8");
