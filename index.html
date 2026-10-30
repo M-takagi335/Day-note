@@ -1304,8 +1304,9 @@
       document.body.appendChild(link);
       link.click();
       link.remove();
-      URL.revokeObjectURL(url);
-      showToast("JSONバックアップを保存しました");
+      // ダウンロード開始前にURLを破棄すると保存が取り消されるブラウザがあるため、少し待ってから破棄する
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      showToast("JSONをダウンロードしました。ダウンロードフォルダを確認してください", 4200);
     }
 
     function isValidPost(post) {
