@@ -277,6 +277,11 @@
       margin-top: 24px;
     }
 
+    .article-bottom-back {
+      width: 100%;
+      margin-top: 28px;
+    }
+
     .editor {
       max-width: 860px;
       margin: 0 auto;
@@ -980,10 +985,13 @@
             <button class="btn btn-primary" id="editBtn">編集する</button>
             <button class="btn btn-danger" id="deleteBtn">削除する</button>
           </div>
+
+          <button class="btn btn-ghost article-bottom-back" id="backHomeBottom">← 記事一覧へ戻る</button>
         </article>
       `;
 
       document.getElementById("backHome").addEventListener("click", () => goHome({ restoreScroll: true }));
+      document.getElementById("backHomeBottom").addEventListener("click", () => goHome({ restoreScroll: true }));
       document.getElementById("editBtn").addEventListener("click", () => renderEditor(id));
       document.getElementById("deleteBtn").addEventListener("click", () => {
         if (!confirm("この記事を削除しますか？")) return;
