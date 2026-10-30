@@ -696,7 +696,7 @@
             <div class="menu-section menu-actions">
               <button class="btn btn-ghost" id="backupBtn" type="button">JSON保存</button>
               <label class="btn btn-ghost import-label" for="restoreInput">JSON復元</label>
-              <input class="visually-hidden" id="restoreInput" type="file" accept="application/json,.json">
+              <input class="visually-hidden" id="restoreInput" type="file" accept=".json,.gz,application/json,application/gzip">
             </div>
           </div>
         </div>
@@ -1287,91 +1287,45 @@
       setTimeout(() => titleInput.focus(), 0);
     }
 
-    // JSONバックアップ専用：Data URL画像をWebPへ圧縮して返す（アプリ内の元データは変更しない）
-    async function compressImageForBackup(dataUrl) {
-      try {
-        if (!dataUrl || typeof dataUrl !== "string") return dataUrl;
-        if (!dataUrl.startsWith("data:image/")) return dataUrl;
-        if (dataUrl.startsWith("data:image/svg+xml")) return dataUrl;
-        if (dataUrl.startsWith("data:image/webp")) return dataUrl;
-
-        const img = new Image();
-        await new Promise((resolve, reject) => {
-          img.onload = resolve;
-          img.onerror = () => reject(new Error("画像を読み込めませんでした"));
-          img.src = dataUrl;
-        });
-
-        const MAX_SIDE = 1280;
-        const srcW = img.naturalWidth;
-        const srcH = img.naturalHeight;
-        if (!srcW || !srcH) return dataUrl;
-        const scale = Math.min(1, MAX_SIDE / Math.max(srcW, srcH));
-        const width = Math.max(1, Math.round(srcW * scale));
-        const height = Math.max(1, Math.round(srcH * scale));
-
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return dataUrl;
-        ctx.drawImage(img, 0, 0, width, height);
-
-        const webp = canvas.toDataURL("image/webp", 0.8);
-        // WebP非対応ブラウザではPNGが返るため、WebPの場合だけ採用する
-        return webp.startsWith("data:image/webp") ? webp : dataUrl;
-      } catch (error) {
-        console.warn("backup image compression failed:", error);
-        return dataUrl;
-      }
+    async function gzipText(text) {
+      const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+      return new Response(stream).blob();
     }
 
-    let isExportingBackup = false;
+    async function decodeBackup(arrayBuffer) {
+      const bytes = new Uint8Array(arrayBuffer);
+      // gzip のマジックナンバー 1f 8b なら展開。旧 .json はそのまま読める
+      if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+        return new Response(stream).text();
+      }
+      return new TextDecoder("utf-8").decode(bytes);
+    }
 
     async function exportBackup() {
-      if (isExportingBackup) return;
-      isExportingBackup = true;
-      const backupBtn = document.getElementById("backupBtn");
-      if (backupBtn) backupBtn.disabled = true;
-      showToast("画像を圧縮してJSONを作成しています…", 4200);
+      const backup = {
+        app: "Story Shelf",
+        version: BACKUP_VERSION,
+        exportedAt: new Date().toISOString(),
+        posts
+      };
 
-      try {
-        // posts本体は変更せず、コピーに対して圧縮済み画像を入れる
-        const compressedPosts = [];
-        for (const post of posts) {
-          compressedPosts.push({
-            ...post,
-            image: await compressImageForBackup(post.image)
-          });
-        }
-
-        const backup = {
-          app: "Story Shelf",
-          version: BACKUP_VERSION,
-          exportedAt: new Date().toISOString(),
-          posts: compressedPosts
-        };
-
-        const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        const stamp = toLocalDateKey(new Date().toISOString()).replaceAll("-", "");
-        link.href = url;
-        link.download = `story-shelf-backup-${stamp}.json`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        // ダウンロード開始前にURLを破棄すると保存が取り消されるブラウザがあるため、少し待ってから破棄する
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
-        const mb = (blob.size / 1024 / 1024).toFixed(2);
-        showToast(`JSONをダウンロードしました（${mb}MB）。ダウンロードフォルダを確認してください`, 4200);
-      } catch (error) {
-        console.error("backup export error:", error);
-        showToast("JSONの書き出しに失敗しました", 4200);
-      } finally {
-        isExportingBackup = false;
-        if (backupBtn) backupBtn.disabled = false;
-      }
+      const json = JSON.stringify(backup); // インデントなし
+      const canGzip = typeof CompressionStream === "function";
+      const blob = canGzip
+        ? await gzipText(json)
+        : new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = toLocalDateKey(new Date().toISOString()).replaceAll("-", "");
+      link.href = url;
+      link.download = `story-shelf-backup-${stamp}.${canGzip ? "json.gz" : "json"}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // ダウンロード開始前にURLを破棄すると保存が取り消されるブラウザがあるため、少し待ってから破棄する
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      showToast("バックアップをダウンロードしました。ダウンロードフォルダを確認してください", 4200);
     }
 
     function isValidPost(post) {
@@ -1403,7 +1357,7 @@
       const reader = new FileReader();
       reader.onload = async () => {
         try {
-          const data = JSON.parse(reader.result);
+          const data = JSON.parse(await decodeBackup(reader.result));
           const importedPosts = Array.isArray(data) ? data : data?.posts;
 
           if (!Array.isArray(importedPosts) || !importedPosts.every(isValidPost)) {
@@ -1439,7 +1393,7 @@
           console.error("render error after import:", error);
         }
       };
-      reader.readAsText(file, "utf-8");
+      reader.readAsArrayBuffer(file);
     }
 
 
