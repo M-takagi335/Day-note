@@ -1287,26 +1287,82 @@
       setTimeout(() => titleInput.focus(), 0);
     }
 
-    function exportBackup() {
-      const backup = {
-        app: "Story Shelf",
-        version: BACKUP_VERSION,
-        exportedAt: new Date().toISOString(),
-        posts
-      };
+    async function optimizeDataURLForBackup(dataUrl) {
+      if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) return dataUrl;
 
-      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      const stamp = toLocalDateKey(new Date().toISOString()).replaceAll("-", "");
-      link.href = url;
-      link.download = `story-shelf-backup-${stamp}.json`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      // ダウンロード開始前にURLを破棄すると保存が取り消されるブラウザがあるため、少し待ってから破棄する
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-      showToast("JSONをダウンロードしました。ダウンロードフォルダを確認してください", 4200);
+      // SVG と、すでに WebP の画像はそのまま利用する。
+      if (dataUrl.startsWith("data:image/svg+xml") || dataUrl.startsWith("data:image/webp")) {
+        return dataUrl;
+      }
+
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error("バックアップ用画像の変換に失敗しました"));
+        img.src = dataUrl;
+      });
+
+      const MAX_SIDE = 1280;
+      const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+      const width = Math.max(1, Math.round(img.naturalWidth * scale));
+      const height = Math.max(1, Math.round(img.naturalHeight * scale));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return dataUrl;
+      ctx.drawImage(img, 0, 0, width, height);
+
+      const optimized = canvas.toDataURL("image/webp", 0.80);
+      return optimized && optimized.startsWith("data:image/webp") ? optimized : dataUrl;
+    }
+
+    async function exportBackup() {
+      const backupBtn = document.getElementById("backupBtn");
+      const originalText = backupBtn?.textContent || "JSON保存";
+
+      try {
+        if (backupBtn) {
+          backupBtn.disabled = true;
+          backupBtn.textContent = "圧縮中…";
+        }
+        showToast("画像を圧縮してJSONを作成しています…", 1800);
+
+        const optimizedPosts = await Promise.all(posts.map(async post => ({
+          ...post,
+          image: await optimizeDataURLForBackup(post.image)
+        })));
+
+        const backup = {
+          app: "Story Shelf",
+          version: BACKUP_VERSION,
+          exportedAt: new Date().toISOString(),
+          posts: optimizedPosts
+        };
+
+        // インデントを付けずに保存し、JSON自体の余分な空白も減らす。
+        const blob = new Blob([JSON.stringify(backup)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        const stamp = toLocalDateKey(new Date().toISOString()).replaceAll("-", "");
+        link.href = url;
+        link.download = `story-shelf-backup-${stamp}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        // ダウンロード開始前にURLを破棄すると保存が取り消されるブラウザがあるため、少し待ってから破棄する
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        showToast("圧縮済みJSONをダウンロードしました", 4200);
+      } catch (error) {
+        console.error(error);
+        showToast("JSONの作成に失敗しました。もう一度お試しください", 4200);
+      } finally {
+        if (backupBtn) {
+          backupBtn.disabled = false;
+          backupBtn.textContent = originalText;
+        }
+      }
     }
 
     function isValidPost(post) {
